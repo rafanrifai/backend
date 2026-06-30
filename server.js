@@ -11,7 +11,24 @@ const JWT_SECRET = process.env.JWT_SECRET || 'uas_bu_andita_secret_key_2026';
 const WA_ADMIN_NUMBER = process.env.WA_ADMIN_NUMBER || '6289603535193';
 
 // Middleware
-app.use(cors());
+const allowedOrigins = [
+  'https://rafanrifai.github.io',
+  'http://localhost:5500',   // Live Server VS Code
+  'http://localhost:3000',   // local dev fallback
+  'http://127.0.0.1:5500'
+];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (Postman, mobile apps, curl)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    callback(new Error(`CORS: Origin ${origin} not allowed`));
+  },
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+}));
 app.use(express.json());
 
 // Helper: Authenticate JWT Token
