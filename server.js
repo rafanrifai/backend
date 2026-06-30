@@ -118,13 +118,15 @@ app.post('/api/auth/login', async (req, res) => {
 
 // 3. Login Admin
 app.post('/api/auth/admin/login', async (req, res) => {
-  const { username, password } = req.body;
-  if (!username || !password) {
+  const { username, email, password } = req.body;
+  const loginIdentifier = username || email; // Support both username and email
+  
+  if (!loginIdentifier || !password) {
     return res.status(400).json({ message: 'Data tidak lengkap' });
   }
 
   try {
-    const [admins] = await db.query('SELECT * FROM admins WHERE username = ?', [username]);
+    const [admins] = await db.query('SELECT * FROM admins WHERE username = ?', [loginIdentifier]);
     if (admins.length === 0) {
       return res.status(400).json({ message: 'Username atau password salah' });
     }
