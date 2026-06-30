@@ -2,6 +2,9 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 const db = require('./db');
 require('dotenv').config();
 
@@ -30,6 +33,42 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json());
+
+// Serve uploaded files statically
+app.use('/uploads', express.static('uploads'));
+
+// Configure multer for image uploads
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadDir = 'uploads/';
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, 'product-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const fileFilter = (req, file, cb) => {
+  const allowedTypes = /jpeg|jpg|png|gif|webp/;
+  const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+  const mimetype = allowedTypes.test(file.mimetype);
+  
+  if (extname && mimetype) {
+    cb(null, true);
+  } else {
+    cb(new Error('Hanya file gambar (jpeg, jpg, png, gif, webp) yang diperbolehkan'));
+  }
+};
+
+const upload = multer({
+  storage: storage,
+  fileFilter: fileFilter,
+  limits: { fileSize: 5 * 1024 * 1024 } // 5MB max
+});
 
 // Helper: Authenticate JWT Token
 const authenticateToken = (req, res, next) => {
@@ -189,11 +228,19 @@ app.get('/api/products/:id', async (req, res) => {
   }
 });
 
-// 6. Create Product (Admin only)
-app.post('/api/products', authenticateToken, isAdmin, async (req, res) => {
-  const { nama, harga, gambar, deskripsi } = req.body;
-  if (!nama || !harga || !gambar || !deskripsi) {
+// 6. Create Product (Admin only) - with image upload
+app.post('/api/products', authenticateToken, isAdmin, upload.single('gambar'), async (req, res) => {
+  const { nama, harga, deskripsi } = req.body;
+  
+  if (!nama || !harga || !deskripsi) {
     return res.status(400).json({ message: 'Data tidak lengkap' });
+  }
+
+  // Get uploaded file path or use provided gambar URL
+  const gambar = req.file ? `/uploads/${req.file.filename}` : (req.body.gambar || '');
+  
+  if (!gambar) {
+    return res.status(400).json({ message: 'Gambar produk harus diupload atau disediakan URL' });
   }
 
   try {
@@ -201,33 +248,54 @@ app.post('/api/products', authenticateToken, isAdmin, async (req, res) => {
       'INSERT INTO produk (nama, harga, gambar, deskripsi) VALUES (?, ?, ?, ?)',
       [nama, harga, gambar, deskripsi]
     );
-    res.status(201).json({ success: true, message: 'Produk berhasil ditambahkan', id: result.insertId });
+    res.status(201).json({ 
+      success: true, 
+      message: 'Produk berhasil ditambahkan', 
+      id: result.insertId,
+      gambar 
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: 'Gagal menambahkan produk' });
   }
 });
 
-// 7. Update Product (Admin only)
-app.put('/api/products/:id', authenticateToken, isAdmin, async (req, res) => {
+// 7. Update Product (Admin only) - with image upload
+app.put('/api/products/:id', authenticateToken, isAdmin, upload.single('gambar'), async (req, res) => {
   const { id } = req.params;
-  const { nama, harga, gambar, deskripsi } = req.body;
+  const { nama, harga, deskripsi } = req.body;
   
-  if (!nama || !harga || !gambar || !deskripsi) {
+  if (!nama || !harga || !deskripsi) {
     return res.status(400).json({ message: 'Data tidak lengkap' });
   }
 
   try {
-    const [check] = await db.query('SELECT id FROM produk WHERE id = ?', [id]);
+    const [check] = await db.query('SELECT * FROM produk WHERE id = ?', [id]);
     if (check.length === 0) {
       return res.status(404).json({ message: 'Produk tidak ditemukan' });
+    }
+
+    // Use new uploaded image if provided, otherwise keep existing or use body gambar
+    let gambar;
+    if (req.file) {
+      gambar = `/uploads/${req.file.filename}`;
+      // Delete old image if it was an uploaded file
+      const oldGambar = check[0].gambar;
+      if (oldGambar && oldGambar.startsWith('/uploads/')) {
+        const oldPath = '.' + oldGambar;
+        if (fs.existsSync(oldPath)) {
+          fs.unlinkSync(oldPath);
+        }
+      }
+    } else {
+      gambar = req.body.gambar || check[0].gambar;
     }
 
     await db.query(
       'UPDATE produk SET nama = ?, harga = ?, gambar = ?, deskripsi = ? WHERE id = ?',
       [nama, harga, gambar, deskripsi, id]
     );
-    res.json({ success: true, message: 'Produk berhasil diubah' });
+    res.json({ success: true, message: 'Produk berhasil diubah', gambar });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: 'Gagal mengubah produk' });
@@ -238,9 +306,18 @@ app.put('/api/products/:id', authenticateToken, isAdmin, async (req, res) => {
 app.delete('/api/products/:id', authenticateToken, isAdmin, async (req, res) => {
   const { id } = req.params;
   try {
-    const [check] = await db.query('SELECT id FROM produk WHERE id = ?', [id]);
+    const [check] = await db.query('SELECT * FROM produk WHERE id = ?', [id]);
     if (check.length === 0) {
       return res.status(404).json({ message: 'Produk tidak ditemukan' });
+    }
+
+    // Delete image file if it's an uploaded file
+    const gambar = check[0].gambar;
+    if (gambar && gambar.startsWith('/uploads/')) {
+      const filePath = '.' + gambar;
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
     }
 
     await db.query('DELETE FROM produk WHERE id = ?', [id]);
@@ -413,6 +490,129 @@ app.get('/api/reports/daily', authenticateToken, isAdmin, async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: 'Gagal menghasilkan laporan harian' });
+  }
+});
+
+
+// --- USERS MANAGEMENT ROUTES (Admin only) ---
+
+// 14. Get All Users
+app.get('/api/users', authenticateToken, isAdmin, async (req, res) => {
+  try {
+    const [users] = await db.query('SELECT id, nama, email FROM users ORDER BY id DESC');
+    res.json(users);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Gagal mengambil data pengguna' });
+  }
+});
+
+// 15. Get User by ID
+app.get('/api/users/:id', authenticateToken, isAdmin, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const [users] = await db.query('SELECT id, nama, email FROM users WHERE id = ?', [id]);
+    if (users.length === 0) {
+      return res.status(404).json({ message: 'Pengguna tidak ditemukan' });
+    }
+    res.json(users[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Gagal mengambil detail pengguna' });
+  }
+});
+
+// 16. Create User (Admin only)
+app.post('/api/users', authenticateToken, isAdmin, async (req, res) => {
+  const { nama, email, password } = req.body;
+  
+  if (!nama || !email || !password) {
+    return res.status(400).json({ message: 'Data tidak lengkap' });
+  }
+
+  try {
+    // Check if email already exists
+    const [existing] = await db.query('SELECT id FROM users WHERE email = ?', [email]);
+    if (existing.length > 0) {
+      return res.status(400).json({ message: 'Email sudah terdaftar' });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+    
+    // Insert user
+    const [result] = await db.query(
+      'INSERT INTO users (nama, email, password) VALUES (?, ?, ?)',
+      [nama, email, hashedPassword]
+    );
+    
+    res.status(201).json({ 
+      success: true, 
+      message: 'Pengguna berhasil ditambahkan',
+      id: result.insertId 
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Gagal menambahkan pengguna' });
+  }
+});
+
+// 17. Update User (Admin only)
+app.put('/api/users/:id', authenticateToken, isAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { nama, email, password } = req.body;
+  
+  if (!nama || !email) {
+    return res.status(400).json({ message: 'Nama dan email harus diisi' });
+  }
+
+  try {
+    const [check] = await db.query('SELECT id FROM users WHERE id = ?', [id]);
+    if (check.length === 0) {
+      return res.status(404).json({ message: 'Pengguna tidak ditemukan' });
+    }
+
+    // Check if email already exists for other users
+    const [existing] = await db.query('SELECT id FROM users WHERE email = ? AND id != ?', [email, id]);
+    if (existing.length > 0) {
+      return res.status(400).json({ message: 'Email sudah digunakan oleh pengguna lain' });
+    }
+
+    // Update with or without password
+    if (password && password.trim() !== '') {
+      const hashedPassword = await bcrypt.hash(password, 10);
+      await db.query(
+        'UPDATE users SET nama = ?, email = ?, password = ? WHERE id = ?',
+        [nama, email, hashedPassword, id]
+      );
+    } else {
+      await db.query(
+        'UPDATE users SET nama = ?, email = ? WHERE id = ?',
+        [nama, email, id]
+      );
+    }
+    
+    res.json({ success: true, message: 'Pengguna berhasil diubah' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Gagal mengubah pengguna' });
+  }
+});
+
+// 18. Delete User (Admin only)
+app.delete('/api/users/:id', authenticateToken, isAdmin, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const [check] = await db.query('SELECT id FROM users WHERE id = ?', [id]);
+    if (check.length === 0) {
+      return res.status(404).json({ message: 'Pengguna tidak ditemukan' });
+    }
+
+    await db.query('DELETE FROM users WHERE id = ?', [id]);
+    res.json({ success: true, message: 'Pengguna berhasil dihapus' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Gagal menghapus pengguna' });
   }
 });
 
